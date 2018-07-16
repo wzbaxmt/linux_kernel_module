@@ -2,10 +2,10 @@ ver = release
 ifeq ($(ver), debug)
 VERSION = `date "+%m%d.%H.%M"`D
 EXTRA_CFLAGS += -D DEBUG -g
-NAME = qtec
+NAME = wyq
 else
 VERSION = `date "+%m%d.%H.%M"`R
-NAME = qtec
+NAME = wyq
 endif
 
 ifneq ($(KERNELRELEASE),)
@@ -18,7 +18,7 @@ else
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD)
 	cp -rf $(NAME).ko ../$(NAME)_v$(VERSION).ko
-	ld -r -d -o qtec.ko.debug qtec.o
+	ld -r -d -o wyq.ko.debug wyq.o
 
 clean:
 	rm -f *.o *.o.cmd *.ko *.mod.c *.symvers *.order *.unsigned *.debug
