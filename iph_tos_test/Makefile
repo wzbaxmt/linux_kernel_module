@@ -10,7 +10,7 @@ endif
 
 ifneq ($(KERNELRELEASE),)
 	obj-m := $(NAME).o
-	$(NAME)-objs := AESHook.o sm4.o
+	$(NAME)-objs := main.o netfilter.o func.o
 else
 	PWD := $(shell pwd)
 	KDIR := /lib/modules/$(shell uname -r)/build
