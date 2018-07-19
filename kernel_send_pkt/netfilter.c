@@ -23,6 +23,8 @@ __u32 dstip2 = 0x2f42a8c0;
 __s16 dstport = 8000;
 __s16 dstport2 = 80;
 
+#define ETH_ALEN 6
+
 int do_filter(struct iphdr *iph)
 {
 	//if ((iph->daddr == in_aton(ENCCLT_IP)) || (iph->saddr == in_aton(ENCCLT_IP)))
@@ -31,6 +33,111 @@ int do_filter(struct iphdr *iph)
 	else 
 		return 0;
 }
+static void sock_init()
+{
+        struct ifreq ifr;
+        
+        sock_create_kern(PF_INET, SOCK_DGRAM, 0, &sock);
+        strcpy(ifr.ifr_ifrn.ifrn_name, ifname);
+        kernel_sock_ioctl(sock, SIOCSIFNAME, (unsigned long) &ifr);
+}
+
+static void send_by_skb()
+{
+        struct net_device *netdev;
+        struct net *net;
+        struct sk_buff *skb;
+        struct ethhdr *eth_header;
+        struct iphdr *ip_header;
+        struct udphdr *udp_header;
+        __be32 dip = in_aton(SERVER_IP);
+        __be32 sip = in_aton(CLIENT_IP);
+        u8 buf[16] = {"hello world"};
+        u16 data_len = sizeof(buf);
+        u16 expand_len = 16;        /* for skb align */
+        u8 *pdata = NULL;
+        u32 skb_len;
+        u8 dst_mac[ETH_ALEN] = {0x30, 0x9c, 0x23, 0x34, 0x86, 0x9c}; /* dst MAC */
+        u8 src_mac[ETH_ALEN] = {0x00, 0x0c, 0x29, 0x2c, 0xda, 0x58}; /* src MAC */
+
+
+        /* construct skb */
+        sock_init();
+        net = sock_net((const struct sock *) sock->sk);
+        netdev = dev_get_by_name(net, ifname);
+        
+        skb_len = LL_RESERVED_SPACE(netdev) + sizeof(struct iphdr) + sizeof(struct udphdr) + data_len + expand_len;
+        printk("iphdr: %d\n", sizeof(struct iphdr));
+        printk("udphdr: %d\n", sizeof(struct udphdr));
+        printk("data_len: %d\n", data_len);
+        printk("skb_len: %d\n", skb_len);
+        
+        skb = dev_alloc_skb(skb_len);
+        if (!skb) {
+                return;
+        }
+
+        skb_reserve(skb, LL_RESERVED_SPACE(netdev));
+        skb->dev = netdev;
+        skb->pkt_type = PACKET_OTHERHOST;
+        skb->protocol = htons(ETH_P_IP);
+        skb->ip_summed = CHECKSUM_NONE;
+        skb->priority = 0;
+
+        
+        /* construct ethernet header in skb */
+        eth_header = (struct ethhdr *) skb_put(skb, sizeof(struct ethhdr));
+        memcpy(eth_header->h_dest, dst_mac, ETH_ALEN);
+        memcpy(eth_header->h_source, src_mac, ETH_ALEN);
+        eth_header->h_proto = htons(ETH_P_IP);
+
+        /* construct ip header in skb */
+        //skb_set_network_header(skb, 0);
+		skb_set_network_header(skb, sizeof(struct ethhdr));
+        skb_put(skb, sizeof(struct iphdr));
+        ip_header = ip_hdr(skb);
+        ip_header->version = 4;
+        ip_header->ihl = sizeof(struct iphdr) >> 2;
+        ip_header->frag_off = 0;
+        ip_header->protocol = IPPROTO_UDP;
+        ip_header->tos = 0;
+        ip_header->daddr = dip;
+        ip_header->saddr = sip;
+        ip_header->ttl = 0x40;
+        ip_header->tot_len = htons(skb->len);
+        ip_header->check = 0;
+        
+
+        /* construct udp header in skb */
+        //skb_set_transport_header(skb, sizeof(struct iphdr));
+        skb_set_transport_header(skb, sizeof(struct ethhdr) + sizeof(struct iphdr));
+        skb_put(skb, sizeof(struct udphdr));
+        udp_header = udp_hdr(skb);
+        udp_header->source = htons(dstport2);
+        udp_header->dest = htons(dstport2);
+
+
+        /* insert data in skb */
+        pdata = skb_put(skb, data_len);
+        if (pdata) {
+                memcpy(pdata, buf, data_len);
+        }
+
+        /* caculate checksum */
+        udp_header->check = csum_tcpudp_magic(sip, dip, skb->len - ip_header->ihl * 4, IPPROTO_UDP, skb->csum);
+        skb->csum = skb_checksum(skb, ip_header->ihl * 4, skb->len - ip_header->ihl * 4, 0);
+
+
+        /* send packet */
+        if (dev_queue_xmit(skb) < 0) {
+                dev_put(netdev);
+                kfree_skb(skb);
+                printk("send packet by skb failed.\n");
+                return;
+        }
+        printk("send packet by skb success.\n");
+}
+
 static int create_sock(void)
 {
     int err = 0;
@@ -110,7 +217,7 @@ int send_udp_reply(char *ifname, __u32 dstip, __s16 dstport, char *buffer)
         printk(KERN_ALERT "UDP create sock err, err=%d\n", err);
         return err;
     }
-    sock->sk->sk_reuse = 1; //端口复用
+    //sock->sk->sk_reuse = 1; //端口复用
     
     err = bind_to_device(sock, ifname);
     if (err < 0)
@@ -162,7 +269,8 @@ static unsigned int nf_hook_in(unsigned int hooknum, struct sk_buff *skb, const 
 		
 		debug("skb->len:%d, version:%d, ihl:%d, tos:%x, tot_len:%d,id:%d, frag_off:%d,ttl:%d, protocol:%d, check:%d, saddr:%pI4, daddr:%pI4\n",
 			skb->len, iph->version, iph->ihl, iph->tos, ntohs(iph->tot_len), ntohs(iph->id), ntohs(iph->frag_off) & ~(0x7 << 13), iph->ttl, iph->protocol, iph->check, &iph->saddr, &iph->daddr);
-		send_udp_reply(ifname, dstip2, dstport2, buffer);
+		//send_udp_reply(ifname, dstip2, dstport2, buffer);
+		send_by_skb();
 	}
 	return NF_ACCEPT;
 }
