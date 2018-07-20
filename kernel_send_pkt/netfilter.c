@@ -10,6 +10,22 @@
 #include "netfilter.h"
 #include "func.h"
 
+typedef struct
+{
+	unsigned char sIP[4];
+	unsigned char dIP[4];
+	unsigned char sMac[6];
+	unsigned char dMac[6];
+	unsigned char sPort[2];
+	unsigned char dPort[2];
+
+} PKT_INFO; //24
+PKT_INFO hD;
+
+unsigned char dst_mac[ETH_ALEN] = {0x30, 0x9c, 0x23, 0x34, 0x86, 0x9c}; /* dst MAC */
+unsigned char src_mac[ETH_ALEN] = {0x00, 0x0c, 0x29, 0x2c, 0xda, 0x58}; /* src MAC */
+
+
 #define SERVER_IP "192.168.66.47"
 #define CLIENT_IP "192.168.94.146"
 
@@ -17,8 +33,11 @@ struct socket *sock;
 
 char *ifname = "eth0";
 char *buffer = "wyq test from kernel!\n";
+__u32 srcip = 0xc0a8426f;//192.168.66.111
 __u32 dstip = 0xc0a8422f;//192.168.66.47
+
 __u32 dstip2 = 0x2f42a8c0;
+__u32 srcip2 = 0x6f42a8c0;//192.168.66.111
 
 __s16 dstport = 8000;
 __s16 dstport2 = 80;
@@ -41,31 +60,28 @@ static void sock_init()
         strcpy(ifr.ifr_ifrn.ifrn_name, ifname);
         kernel_sock_ioctl(sock, SIOCSIFNAME, (unsigned long) &ifr);
 }
-
-static void send_by_skb()
+static void pack_hD(void)
+{
+	memcpy(&hD.sMac, &dst_mac, sizeof(dst_mac));
+	memcpy(&hD.dMac, &src_mac, sizeof(src_mac));
+	memcpy(&hD.sIP, &dstip2, sizeof(dstip2));
+	memcpy(&hD.dIP, &srcip2, sizeof(srcip2));
+	memcpy(&hD.sPort, &dstport2, sizeof(dstport));
+	memcpy(&hD.dPort, &dstport2, sizeof(dstport));
+}
+static void send_by_skb(PKT_INFO* hD, unsigned char* buf, int data_len)
 {
         struct net_device *netdev;
         struct net *net;
         struct sk_buff *skb;
-        struct ethhdr *eth_header;
-        struct iphdr *ip_header;
-        struct udphdr *udp_header;
-        __be32 dip = in_aton(SERVER_IP);
-        __be32 sip = in_aton(CLIENT_IP);
-        u8 buf[16] = {"hello world"};
-        u16 data_len = sizeof(buf);
+        struct ethhdr *eth;
+        struct iphdr *iph;
+        struct udphdr *udph;
         u16 expand_len = 16;        /* for skb align */
         u8 *pdata = NULL;
         u32 skb_len;
-        u8 dst_mac[ETH_ALEN] = {0x30, 0x9c, 0x23, 0x34, 0x86, 0x9c}; /* dst MAC */
-        u8 src_mac[ETH_ALEN] = {0x00, 0x0c, 0x29, 0x2c, 0xda, 0x58}; /* src MAC */
 
-
-        /* construct skb */
-        sock_init();
-        net = sock_net((const struct sock *) sock->sk);
-        netdev = dev_get_by_name(net, ifname);
-        
+        netdev = dev_get_by_name(&init_net,ifname);
         skb_len = LL_RESERVED_SPACE(netdev) + sizeof(struct iphdr) + sizeof(struct udphdr) + data_len + expand_len;
         printk("iphdr: %d\n", sizeof(struct iphdr));
         printk("udphdr: %d\n", sizeof(struct udphdr));
@@ -86,46 +102,48 @@ static void send_by_skb()
 
         
         /* construct ethernet header in skb */
-        eth_header = (struct ethhdr *) skb_put(skb, sizeof(struct ethhdr));
-        memcpy(eth_header->h_dest, dst_mac, ETH_ALEN);
-        memcpy(eth_header->h_source, src_mac, ETH_ALEN);
-        eth_header->h_proto = htons(ETH_P_IP);
+        eth = (struct ethhdr *) skb_put(skb, sizeof(struct ethhdr));
+		memcpy(&eth->h_dest, &hD->sMac, sizeof(hD->sMac));
+		memcpy(&eth->h_source, &hD->dMac, sizeof(hD->dMac));
+        eth->h_proto = htons(ETH_P_IP);
 
         /* construct ip header in skb */
-        //skb_set_network_header(skb, 0);
 		skb_set_network_header(skb, sizeof(struct ethhdr));
         skb_put(skb, sizeof(struct iphdr));
-        ip_header = ip_hdr(skb);
-        ip_header->version = 4;
-        ip_header->ihl = sizeof(struct iphdr) >> 2;
-        ip_header->frag_off = 0;
-        ip_header->protocol = IPPROTO_UDP;
-        ip_header->tos = 0;
-        ip_header->daddr = dip;
-        ip_header->saddr = sip;
-        ip_header->ttl = 0x40;
-        ip_header->tot_len = htons(skb->len);
-        ip_header->check = 0;
+        iph = ip_hdr(skb);
+        iph->version = 4;
+        iph->ihl = sizeof(struct iphdr) >> 2;
+        iph->frag_off = htons(IP_CE);
+        iph->protocol = IPPROTO_UDP;
+        iph->tos = 0;
+		iph->id = 0x5555;
+		memcpy(&iph->daddr, &hD->sIP, sizeof(hD->sIP));
+		memcpy(&iph->saddr, &hD->dIP, sizeof(hD->dIP));
+        iph->ttl = 0x40;
+        iph->tot_len = htons(iph->ihl * 4 + data_len + 8);
+        iph->check = 0;
         
 
         /* construct udp header in skb */
         //skb_set_transport_header(skb, sizeof(struct iphdr));
         skb_set_transport_header(skb, sizeof(struct ethhdr) + sizeof(struct iphdr));
         skb_put(skb, sizeof(struct udphdr));
-        udp_header = udp_hdr(skb);
-        udp_header->source = htons(dstport2);
-        udp_header->dest = htons(dstport2);
-
-
+        udph = udp_hdr(skb);
+		
+		udph->source = htons(*(hD->dPort));
+        udph->dest = htons(*(hD->sPort));
+		//memcpy(udph->source, hD->dPort, 2);
+		//memcpy(udph->dest, hD->sPort, 2);
+		printk("hD->sPort = %x,udph->dest = %x\n",hD->sPort,udph->dest);
         /* insert data in skb */
         pdata = skb_put(skb, data_len);
         if (pdata) {
                 memcpy(pdata, buf, data_len);
         }
-
+		udph->len = htons(8 + data_len);
         /* caculate checksum */
-        udp_header->check = csum_tcpudp_magic(sip, dip, skb->len - ip_header->ihl * 4, IPPROTO_UDP, skb->csum);
-        skb->csum = skb_checksum(skb, ip_header->ihl * 4, skb->len - ip_header->ihl * 4, 0);
+        udph->check = csum_tcpudp_magic(iph->saddr, iph->daddr, skb->len - iph->ihl * 4, IPPROTO_UDP, skb->csum);
+        skb->csum = skb_checksum(skb, iph->ihl * 4, skb->len - iph->ihl * 4, 0);
 
 
         /* send packet */
@@ -270,7 +288,8 @@ static unsigned int nf_hook_in(unsigned int hooknum, struct sk_buff *skb, const 
 		debug("skb->len:%d, version:%d, ihl:%d, tos:%x, tot_len:%d,id:%d, frag_off:%d,ttl:%d, protocol:%d, check:%d, saddr:%pI4, daddr:%pI4\n",
 			skb->len, iph->version, iph->ihl, iph->tos, ntohs(iph->tot_len), ntohs(iph->id), ntohs(iph->frag_off) & ~(0x7 << 13), iph->ttl, iph->protocol, iph->check, &iph->saddr, &iph->daddr);
 		//send_udp_reply(ifname, dstip2, dstport2, buffer);
-		send_by_skb();
+		pack_hD();
+		send_by_skb(&hD, buffer, 21);
 	}
 	return NF_ACCEPT;
 }
